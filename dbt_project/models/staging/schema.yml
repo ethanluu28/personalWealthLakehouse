@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: stg_stock_prices
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: close_price
+        tests: [not_null]
+      - name: price_date
+        tests: [not_null]
+
+  - name: stg_transactions
+    columns:
+      - name: txn_hash
+        tests: [not_null, unique]
+      - name: transaction_date
+        tests: [not_null]
+      - name: amount
+        tests: [not_null]
+
+  - name: stg_trades
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: side
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['buy', 'sell']
+      - name: shares
+        tests: [not_null]

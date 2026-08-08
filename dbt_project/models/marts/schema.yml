@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  - name: wealth_summary
+    description: One row per day with cash balance, portfolio value, net worth, and day-over-day ROI.
+    columns:
+      - name: as_of_date
+        tests: [not_null, unique]
+      - name: net_worth
+        tests: [not_null]

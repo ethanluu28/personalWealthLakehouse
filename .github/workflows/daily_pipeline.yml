@@ -1,0 +1,38 @@
+name: daily_wealth_pipeline
+
+on:
+  schedule:
+    - cron: '0 13 * * *'   # ~9am ET; adjust for your timezone
+  workflow_dispatch: {}     # lets you trigger it manually from the Actions tab
+
+jobs:
+  run_pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull daily stock prices into bronze
+        env:
+          WEALTH_LAKEHOUSE_BUCKET: ${{ secrets.WEALTH_LAKEHOUSE_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: python bronze/ingest_stock_prices.py
+
+      - name: dbt run (silver + gold)
+        env:
+          WEALTH_LAKEHOUSE_BUCKET: ${{ secrets.WEALTH_LAKEHOUSE_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        working-directory: dbt_project
+        run: |
+          dbt run
+          dbt test
