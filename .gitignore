@@ -8,3 +8,5 @@ __pycache__/
 *.pyc
 .DS_Store
 bronze_local/
+personal_data/broker_exports/
+personal_data/bank_exports/
