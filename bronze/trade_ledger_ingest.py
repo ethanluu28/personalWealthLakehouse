@@ -60,8 +60,9 @@ def account_label_from_filename(file_path: Path) -> str:
 def parse_trade_ledger(csv_path: Path) -> pd.DataFrame:
     """
     Parses the Fidelity-style trade ledger export into a normalized schema:
-      trade_date (date), action (str), symbol (str), currency (str),
-      price (float), quantity (float), amount (float), source_account_hint (str)
+      trade_date (date), account (str), action (str), symbol (str),
+      currency (str), price (float), quantity (float), amount (float),
+      source_account_hint (str)
     """
     df = pd.read_csv(csv_path, skiprows=HEADER_SKIPROWS, skipfooter=FOOTER_SKIPROWS, engine="python")
 
@@ -93,11 +94,6 @@ def parse_trade_ledger(csv_path: Path) -> pd.DataFrame:
     df["symbol"] = df["symbol"].astype(str).str.strip()
     df["action"] = df["action"].astype(str).str.strip()
 
-    # TODO: Price/Quantity/Amount may arrive with $ signs, commas, or
-    # parentheses-for-negative depending on export settings — inspect a real
-    # file before trusting a plain astype(float). If it fails, strip
-    # non-numeric characters first, e.g.:
-    #   df[col] = df[col].replace(r'[\$,]', '', regex=True).astype(float)
     df["price"] = df["price"].astype(float)
     df["quantity"] = df["quantity"].astype(float)
     df["amount"] = df["amount"].astype(float)  # buys negative, sells/dividends positive — confirmed, no flip
@@ -167,16 +163,48 @@ def main():
         sys.exit(f"File not found: {args.file}")
 
     df = parse_trade_ledger(args.file)
+
+    if df is None or df.empty:
+        sys.exit(f"Validation Failed: {args.file.name} is empty or returned no data.")
+
     df = add_ingestion_metadata(df, args.file)
 
     print(f"Parsed {len(df)} rows from {args.file.name}")
     print(df.head())
 
-    # TODO: add validation before writing — e.g. assert no null trade_date,
-    # assert quantity/price/amount are numeric and non-null, sanity-check
-    # that buy rows have negative amount and sell/dividend rows have
-    # positive amount (catches a sign-convention surprise early), flag
-    # duplicate row_hash within this file.
+    # --- Validation before writing ---
+
+    # Check 1: null trade_date — real parsing failure, hard fail.
+    null_dates = df["trade_date"].isnull().sum()
+    assert null_dates == 0, f"Validation Failed: Found {null_dates} rows with null trade_date."
+
+    # Check 2: amount numeric/non-null — required for every row type: trades, dividends, interest alike), hard fail.
+    null_amounts = pd.to_numeric(df["amount"], errors="coerce").isnull().sum()
+    assert null_amounts == 0, f"Validation Failed: Found {null_amounts} rows where 'amount' is not numeric."
+
+    # Check 3: price/quantity null on BUY/SELL/REINVESTMENT rows specifically soft warning
+    trade_rows = df[df["action"].str.contains("bought|sold|reinvestment", case=False, na=False)]
+    bad_trade_rows = trade_rows[trade_rows["price"].isnull() | trade_rows["quantity"].isnull()]
+    if len(bad_trade_rows):
+        print(f"Warning: {len(bad_trade_rows)} buy/sell/reinvestment rows have a null price or quantity:")
+        print(bad_trade_rows[["trade_date", "account", "action", "symbol", "price", "quantity", "amount"]])
+
+    # Check 4: sign convention (buys/reinvestments negative, sells/dividends positive) — soft warning. 
+    buys = df[df["action"].str.contains("bought|reinvestment", case=False, na=False)]
+    sells_or_divs = df[df["action"].str.contains("sold|dividend", case=False, na=False)]
+    bad_buys = buys[buys["amount"] >= 0]
+    bad_sells = sells_or_divs[sells_or_divs["amount"] <= 0]
+    if len(bad_buys):
+        print(f"Warning: {len(bad_buys)} buy rows have non-negative amount — sign convention may have broken:")
+        print(bad_buys[["trade_date", "account", "action", "symbol", "amount"]])
+    if len(bad_sells):
+        print(f"Warning: {len(bad_sells)} sell/dividend rows have non-positive amount — sign convention may have broken:")
+        print(bad_sells[["trade_date", "account", "action", "symbol", "amount"]])
+
+    # Check 5: duplicate row_hash — soft warning
+    duplicate_count = df["row_hash"].duplicated().sum()
+    if duplicate_count > 0:
+        print(f"Warning: Found {duplicate_count} duplicate row_hash entries in this file — investigate, but continuing.")
 
     write_to_bronze(df, dry_run=args.dry_run)
 

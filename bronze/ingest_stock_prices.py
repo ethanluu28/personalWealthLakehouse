@@ -13,9 +13,9 @@ Partitioned by trading date:
     s3://<bucket>/bronze/stock_prices/date=2026-08-10/*.parquet
 
 Usage:
-    python ingest_stock_prices.py --dry-run
-    python ingest_stock_prices.py --start 2026-08-01 --end 2026-08-10
-    python ingest_stock_prices.py --tickers NVDA,COIN --dry-run   # ad-hoc, on top of auto+watchlist
+    python bronze/ingest_stock_prices.py --dry-run
+    python bronze/ingest_stock_prices.py --start 2026-08-01 --end 2026-08-10
+    python bronze/ingest_stock_prices.py --tickers NVDA,COIN --dry-run   # ad-hoc, on top of auto+watchlist
 """
 
 import argparse
@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import boto3
@@ -175,23 +176,53 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    end_date = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else datetime.now().date()
-    start_date = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else end_date - timedelta(days=5)
+    # Fix Timezone (Target US Markets)
+    market_tz = ZoneInfo("America/New_York")
+    today_market = datetime.now(market_tz).date()
 
+    # Parse Dates Safely
+    try:
+        end_date = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else today_market
+        start_date = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else end_date - timedelta(days=5)
+    except ValueError as e:
+        sys.exit(f"Date parsing error: {e}. Use YYYY-MM-DD format.")
+        return
+
+    # Building ticket set
     symbols = get_portfolio_symbols() | get_watchlist_symbols()
     if args.tickers:
         symbols |= {t.strip().upper() for t in args.tickers.split(",") if t.strip()}
+    sorted_symbols = sorted(symbols)
 
     df = fetch_prices(sorted(symbols), start=str(start_date), end=str(end_date + timedelta(days=1)))  # +1: yfinance end is exclusive
+
+    if df is None or df.empty:
+        sys.exit("No data fetched, dataframe is empty")
+
     df = add_ingestion_metadata(df)
 
     print(f"\nParsed {len(df)} price rows across {df['symbol'].nunique()} symbols")
     print(df.head())
 
-    # TODO: add validation before writing — e.g. assert no null close,
-    # assert price_date range matches what was requested, flag any ticker
-    # in `symbols` that returned zero rows (already warned above, but not
-    # currently a hard failure).
+    # Check 1: Assert no null close prices
+    null_close_count = df['close'].isnull().sum()
+    assert null_close_count == 0, f"Validation Failed: Found {null_close_count} rows with null close prices."
+
+    # Check 2: Flag tickers that returned zero rows
+    fetched_symbols = set(df['symbol'].unique())
+    missing_symbols = set(sorted_symbols) - fetched_symbols
+    if missing_symbols:
+        print(f"Warning: The following tickers returned 0 rows: {missing_symbols}")
+
+    # Check 3: Assert date range matches what was requested
+    # Convert string dates in DF to datetime.date objects for exact comparison
+    df_dates = pd.to_datetime(df['price_date']).dt.date
+    df_min_date = df_dates.min()
+    df_max_date = df_dates.max()
+
+    # We validate that the data sits strictly within the bounds requested
+    assert df_min_date >= start_date, f"Validation Failed: Data starts at {df_min_date}, requested {start_date}"
+    assert df_max_date <= end_date, f"Validation Failed: Data ends at {df_max_date}, requested target was {end_date}"
 
     write_to_bronze(df, dry_run=args.dry_run)
 

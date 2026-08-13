@@ -12,8 +12,8 @@ Design:
     s3://<bucket>/bronze/bank_transactions/source=chase/year_month=2026-08/*.parquet
 
 Usage:
-    python bronze_ingest_bank_csv.py --source amex --file ~/Downloads/amex_activity.csv
-    python bronze_ingest_bank_csv.py --source chase --file ~/Downloads/Chase_Activity.CSV
+    python bronze/bronze_ingest_bank_csv.py --source amex --file ~/Downloads/amex_activity.csv
+    python bronze/bronze_ingest_bank_csv.py --source chase --file ~/Downloads/Chase_Activity.CSV
 """
 
 import argparse
@@ -32,7 +32,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config from .env / config file
 # ---------------------------------------------------------------------------
-S3_BUCKET = os.environ["WEALTH_LAKEHOUSE_BUCKET"]  # TODO: load from env var, e.g. os.environ["WEALTH_LAKEHOUSE_BUCKET"]
+S3_BUCKET = os.environ["WEALTH_LAKEHOUSE_BUCKET"]
 BRONZE_PREFIX = "bronze/bank_transactions"
 AWS_REGION = os.environ["AWS_REGION"]  # e.g. "us-west-2"
 
@@ -98,7 +98,6 @@ def parse_chase(csv_path: Path) -> pd.DataFrame:
     })
 
     df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce").dt.date
-    df["post_date"] = pd.to_datetime(df["post_date"], errors="coerce").dt.date
     df["amount"] = df["amount"].astype(float) * -1  # flip sign, see docstring
     df["source_account_hint"] = account_label_from_filename(csv_path)
 
@@ -124,9 +123,13 @@ def add_ingestion_metadata(df: pd.DataFrame, source: str, source_file: Path) -> 
     df["ingested_at"] = datetime.now(timezone.utc)
 
     hash_cols = ["transaction_date", "description", "amount"]
-    df["row_hash"] = df[hash_cols].apply(
-        lambda row: hashlib.sha256("|".join(str(v) for v in row).encode()).hexdigest(),
-        axis=1,
+
+    # Tie breaker implementation
+    base_key = df[hash_cols].apply(lambda row: "|".join(str(v) for v in row), axis=1)
+    occurrence = base_key.groupby(base_key).cumcount().astype(str)
+ 
+    df["row_hash"] = (base_key + "|" + occurrence).apply(
+        lambda s: hashlib.sha256(s.encode()).hexdigest()
     )
     return df
 
@@ -162,14 +165,9 @@ def write_to_bronze(df: pd.DataFrame, source: str, dry_run: bool = False) -> Non
 
         if dry_run:
             print(f"[dry-run] would upload {local_tmp} -> s3://{S3_BUCKET}/{s3_key}")
+            local_tmp.unlink(missing_ok=True)
             continue
 
-        # TODO: decide overwrite vs. append behavior. As written, this OVERWRITES
-        # any existing file at this exact key. If you re-run ingestion for a file
-        # you've already loaded, you'll clobber, not duplicate — that's probably
-        # what you want, but consider a more robust upsert/merge strategy once
-        # you're past the prototype stage (e.g. content-addressed filenames using
-        # row_hash, or a proper merge in silver using row_hash for dedup instead).
         s3.upload_file(str(local_tmp), S3_BUCKET, s3_key)
         print(f"Uploaded {len(group)} rows -> s3://{S3_BUCKET}/{s3_key}")
 
@@ -183,21 +181,49 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Parse and show summary without uploading to S3")
     args = parser.parse_args()
 
+    args.file = args.file.expanduser()
+
     if not args.file.exists():
         sys.exit(f"File not found: {args.file}")
 
     parse_fn = PARSERS[args.source]
     df = parse_fn(args.file)
+
+    if df is None or df.empty:
+        sys.exit(f"Validation Failed: {args.file.name} is empty or returned no data.")
+    
     df = add_ingestion_metadata(df, args.source, args.file)
 
     print(f"Parsed {len(df)} rows from {args.file.name}")
     print(df.head())
 
-    # TODO: add validation here before writing — e.g. assert no null
-    # transaction_date, assert amount is numeric, flag duplicate row_hash
-    # within this file, sanity-check date range looks like one statement
-    # period, etc. Fail loudly rather than writing bad data to bronze.
+     # Check 1: Assert no null transaction dates
+    null_dates = df['transaction_date'].isnull().sum()
+    assert null_dates == 0, f"Validation Failed: Found {null_dates} missing transaction_date values."
 
+    # Check 2: Ensure amount is numeric (Coerce and check for NaN)
+    # This catches hidden string characters like '$' or commas before asserting
+    numeric_amounts = pd.to_numeric(df['amount'], errors='coerce')
+    null_amounts = numeric_amounts.isnull().sum()
+    assert null_amounts == 0, f"Validation Failed: Found {null_amounts} rows where 'amount' is not numeric."
+
+    # Check 3: Flag duplicate row_hash values within this file
+    duplicate_count = df['row_hash'].duplicated().sum()
+    if duplicate_count > 0:
+        print(f"Warning: Found {duplicate_count} duplicate row_hash entries in this file — investigate, but continuing.")
+
+    # Check 4: Sanity-check date range (Statement Period)
+    # Convert to datetime objects for accurate timedelta math
+    df_dates = pd.to_datetime(df['transaction_date']).dt.date
+    min_date = df_dates.min()
+    max_date = df_dates.max()
+    days_span = (max_date - min_date).days
+
+    if days_span == 0:
+        print(f"Note: file only contains transactions for a single day ({min_date}).")
+    elif days_span > 35:
+        print(f"Warning: date range spans {days_span} days ({min_date} to {max_date}) — wider than a typical single statement period, double check {args.file.name}.")
+    
     write_to_bronze(df, args.source, dry_run=args.dry_run)
 
 
