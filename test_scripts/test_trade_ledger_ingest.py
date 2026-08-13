@@ -10,10 +10,11 @@ Directory layout assumed:
     project_root/
       bronze/
         trade_ledger_ingest.py
-      personal_data/
+      test_data/
         broker_exports/
           fidelity_2025.csv
-      test_trade_ledger_ingest.py   <- this file
+      test_scripts/
+        test_trade_ledger_ingest.py   <- this file
 
 Usage:
     python test_trade_ledger_ingest.py
@@ -22,7 +23,7 @@ Usage:
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # was .parent — one more level up now that this script lives in test_scripts/
 sys.path.append(str(PROJECT_ROOT / "bronze"))
 
 from trade_ledger_ingest import parse_trade_ledger, add_ingestion_metadata, add_partition_key  # noqa: E402
@@ -52,7 +53,7 @@ def run():
     dupes = df[df.duplicated(subset="row_hash", keep=False)].sort_values("row_hash")
     if len(dupes):
         print(f"\n{len(dupes)} rows share a row_hash with at least one other row:")
-        print(dupes[["trade_date", "account", "action", "symbol", "quantity", "price", "amount"]])
+        print(dupes[["trade_date", "action", "symbol", "quantity", "price", "amount"]])
 
     assert df["row_hash"].nunique() == len(df), (
 

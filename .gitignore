@@ -10,3 +10,4 @@ __pycache__/
 bronze_local/
 personal_data/broker_exports/
 personal_data/bank_exports/
+venv/
