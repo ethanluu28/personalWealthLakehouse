@@ -13,9 +13,9 @@ Partitioned by trading date:
     s3://<bucket>/bronze/stock_prices/date=2026-08-10/*.parquet
 
 Usage:
-    python ingest_stock_price.py --dry-run
-    python ingest_stock_price.py --start 2026-08-01 --end 2026-08-10
-    python ingest_stock_price.py --tickers NVDA,COIN --dry-run   # ad-hoc, on top of auto+watchlist
+    python ingest_stock_prices.py --dry-run
+    python ingest_stock_prices.py --start 2026-08-01 --end 2026-08-10
+    python ingest_stock_prices.py --tickers NVDA,COIN --dry-run   # ad-hoc, on top of auto+watchlist
 """
 
 import argparse
