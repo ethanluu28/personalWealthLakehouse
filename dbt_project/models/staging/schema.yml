@@ -1,32 +1,49 @@
 version: 2
 
 models:
-  - name: stg_stock_prices
+  - name: stg_trades
     columns:
-      - name: ticker
+      - name: trade_date
         tests: [not_null]
-      - name: close_price
+      - name: account
         tests: [not_null]
-      - name: price_date
+      - name: action
         tests: [not_null]
-
-  - name: stg_transactions
-    columns:
-      - name: txn_hash
-        tests: [not_null, unique]
-      - name: transaction_date
+      - name: symbol
         tests: [not_null]
       - name: amount
         tests: [not_null]
-
-  - name: stg_trades
-    columns:
-      - name: ticker
-        tests: [not_null]
-      - name: side
+      - name: source
         tests:
           - not_null
           - accepted_values:
-              values: ['buy', 'sell']
-      - name: shares
+              values: ['fidelity', 'vanguard']
+      - name: row_hash
+        tests: [not_null, unique]
+
+  - name: stg_transactions
+    columns:
+      - name: transaction_date
         tests: [not_null]
+      - name: description
+        tests: [not_null]
+      - name: amount
+        tests: [not_null]
+      - name: source
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['amex', 'chase']
+      - name: row_hash
+        tests: [not_null, unique]
+
+  - name: stg_stock_prices
+    columns:
+      - name: price_date
+        tests: [not_null]
+      - name: symbol
+        tests: [not_null]
+      - name: close
+        tests: [not_null]
+      - name: row_hash
+        tests: [not_null, unique]
