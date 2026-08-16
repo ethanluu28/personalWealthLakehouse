@@ -29,7 +29,7 @@ standardized as (
 deduped as (
     select *
     from (
-        select *, row_number() over(partition by row_hash by ingested_at asc) as rn
+        select *, row_number() over(partition by row_hash order by ingested_at asc) as rn
         from standardized
     )
     where rn = 1

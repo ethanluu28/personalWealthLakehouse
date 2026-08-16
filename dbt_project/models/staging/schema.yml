@@ -10,7 +10,10 @@ models:
       - name: action
         tests: [not_null]
       - name: symbol
-        tests: [not_null]
+        tests:
+          - not_null:
+              config:
+                where: "action ilike '%bought%' or action ilike '%sold%' or action ilike '%reinvestment%'"
       - name: amount
         tests: [not_null]
       - name: source

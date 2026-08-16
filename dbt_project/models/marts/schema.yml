@@ -2,9 +2,62 @@ version: 2
 
 models:
   - name: wealth_summary
-    description: One row per day with cash balance, portfolio value, net worth, and day-over-day ROI.
     columns:
       - name: as_of_date
         tests: [not_null, unique]
-      - name: net_worth
+      - name: portfolio_value
         tests: [not_null]
+
+  - name: monthly_spending
+    columns:
+      - name: month
+        tests: [not_null]
+      - name: category
+        tests: [not_null]
+      - name: total_spent
+        tests: [not_null]
+
+  - name: position_lots
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: source
+        tests: [not_null]
+      - name: shares_held
+        tests:
+          - not_null
+          # negative shares_held would mean a sell exceeded holdings — a real bug
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+
+  - name: realized_gains
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: source
+        tests: [not_null]
+
+  - name: unrealized_gains
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: source
+        tests: [not_null]
+      - name: shares_held
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false   # excludes 0 — this mart already filters shares_held > 0
+
+  - name: investment_growth
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: source
+        tests: [not_null]
+
+  - name: portfolio_roe_summary
+    columns:
+      - name: source
+        tests: [not_null, unique]
