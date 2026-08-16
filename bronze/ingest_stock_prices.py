@@ -1,7 +1,7 @@
 """
 Bronze layer ingestion: daily stock prices (yfinance) -> partitioned Parquet on S3
 
-Ticker source (hybrid, per your call):
+Ticker source:
   1. Auto-derived from DISTINCT symbols already present in bronze/trades
      (queried directly from S3 via DuckDB + httpfs — no separate copy needed)
   2. Supplemented by an optional static watchlist file (watchlist.txt, one
@@ -9,13 +9,14 @@ Ticker source (hybrid, per your call):
      without having traded them yet
 Both sources are merged and deduped.
 
-Partitioned by trading date:
-    s3://<bucket>/bronze/stock_prices/date=2026-08-10/*.parquet
+Partitioned by year and month (matches bank/trades bronze convention):
+    s3://<bucket>/bronze/stock_prices/year_month=2026-08/*.parquet
 
 Usage:
     python bronze/ingest_stock_prices.py --dry-run
     python bronze/ingest_stock_prices.py --start 2026-08-01 --end 2026-08-10
     python bronze/ingest_stock_prices.py --tickers NVDA,COIN --dry-run   # ad-hoc, on top of auto+watchlist
+    python bronze/ingest_stock_prices.py --backfill --dry-run            # from earliest trade_date to today
 """
 
 import argparse
@@ -48,6 +49,16 @@ AWS_REGION = os.environ["AWS_REGION"]
 # Ticker sourcing
 # ---------------------------------------------------------------------------
 
+def _connect_duckdb_s3() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(f"SET s3_region='{AWS_REGION}';")
+    if "AWS_ACCESS_KEY_ID" in os.environ and "AWS_SECRET_ACCESS_KEY" in os.environ:
+        con.execute(f"SET s3_access_key_id='{os.environ['AWS_ACCESS_KEY_ID']}';")
+        con.execute(f"SET s3_secret_access_key='{os.environ['AWS_SECRET_ACCESS_KEY']}';")
+    return con
+
+
 def get_portfolio_symbols() -> set[str]:
     """
     Query DISTINCT symbols directly from bronze/trades on S3 via DuckDB's
@@ -55,14 +66,7 @@ def get_portfolio_symbols() -> set[str]:
     Returns an empty set (with a warning, not a crash) if bronze/trades
     doesn't exist yet or is unreachable, so this script still works standalone.
     """
-    con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute(f"SET s3_region='{AWS_REGION}';")
-
-    if "AWS_ACCESS_KEY_ID" in os.environ and "AWS_SECRET_ACCESS_KEY" in os.environ:
-        con.execute(f"SET s3_access_key_id='{os.environ['AWS_ACCESS_KEY_ID']}';")
-        con.execute(f"SET s3_secret_access_key='{os.environ['AWS_SECRET_ACCESS_KEY']}';")
-
+    con = _connect_duckdb_s3()
     s3_glob = f"s3://{S3_BUCKET}/{TRADES_PREFIX}/**/*.parquet"
     try:
         result = con.execute(f"SELECT DISTINCT symbol FROM read_parquet('{s3_glob}')").fetchall()
@@ -72,6 +76,24 @@ def get_portfolio_symbols() -> set[str]:
     except duckdb.IOException:
         print("WARNING: could not read bronze/trades (no files yet?) — continuing with watchlist only")
         return set()
+
+
+def get_earliest_trade_date() -> "datetime.date | None":
+    """
+    Queries MIN(trade_date) across all of bronze/trades (Fidelity + Vanguard,
+    source=* glob) — used by --backfill to find how far back price history
+    needs to go. Returns None if bronze/trades is empty/unreachable.
+    """
+    con = _connect_duckdb_s3()
+    s3_glob = f"s3://{S3_BUCKET}/{TRADES_PREFIX}/source=*/year_month=*/*.parquet"
+    try:
+        result = con.execute(f"SELECT MIN(trade_date) FROM read_parquet('{s3_glob}')").fetchone()
+        if result and result[0] is not None:
+            return pd.to_datetime(result[0]).date()
+        return None
+    except duckdb.IOException:
+        print("WARNING: could not read bronze/trades for backfill — no files yet?")
+        return None
 
 
 def get_watchlist_symbols() -> set[str]:
@@ -91,8 +113,8 @@ def get_watchlist_symbols() -> set[str]:
 def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     """
     Pulls daily OHLCV for all tickers in one batched yfinance call.
-    TODO: yfinance's `end` is exclusive — pass end date + 1 day if you want
-    that calendar day included. Handled in main() below.
+    NOTE: yfinance's `end` is exclusive — main() passes end date + 1 day so
+    that calendar day is included.
     """
     if not tickers:
         sys.exit("No tickers to fetch — bronze/trades is empty and watchlist.txt has no entries.")
@@ -148,15 +170,26 @@ def add_ingestion_metadata(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_partition_key(df: pd.DataFrame, date_column: str) -> pd.DataFrame:
+    """Adds a 'year_month' column, same helper pattern as bank/trades bronze scripts."""
+    df = df.copy()
+    dt = pd.to_datetime(df[date_column])
+    df["year_month"] = dt.dt.to_period("M").astype(str)
+    return df
+
+
 def write_to_bronze(df: pd.DataFrame, dry_run: bool = False) -> None:
-    """Partition by trading date and write one Parquet file per date to S3."""
+    """Split by year_month and write one Parquet file per partition to S3
+    (matches bronze/bank_transactions and bronze/trades convention)."""
+    df = add_partition_key(df, "price_date")
+
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
-    for price_date, group in df.groupby("price_date"):
-        local_tmp = Path(tempfile.gettempdir()) / f"stock_prices_{price_date}.parquet"
-        group.to_parquet(local_tmp, index=False)
+    for year_month, group in df.groupby("year_month"):
+        local_tmp = Path(tempfile.gettempdir()) / f"stock_prices_{year_month}.parquet"
+        group.drop(columns=["year_month"]).to_parquet(local_tmp, index=False)
 
-        s3_key = f"{BRONZE_PREFIX}/date={price_date}/{local_tmp.name}"
+        s3_key = f"{BRONZE_PREFIX}/year_month={year_month}/{local_tmp.name}"
 
         if dry_run:
             print(f"[dry-run] would upload {local_tmp} -> s3://{S3_BUCKET}/{s3_key} ({len(group)} rows)")
@@ -173,6 +206,7 @@ def main():
     parser.add_argument("--start", type=str, default=None, help="YYYY-MM-DD, default: 5 days ago (covers weekends/holidays)")
     parser.add_argument("--end", type=str, default=None, help="YYYY-MM-DD, default: today")
     parser.add_argument("--tickers", type=str, default=None, help="Comma-separated extra tickers, added on top of auto+watchlist")
+    parser.add_argument("--backfill", action="store_true", help="Set start date to the earliest trade_date found in bronze/trades, overrides --start")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -183,7 +217,15 @@ def main():
     # Parse Dates Safely
     try:
         end_date = datetime.strptime(args.end, "%Y-%m-%d").date() if args.end else today_market
-        start_date = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else end_date - timedelta(days=5)
+
+        if args.backfill:
+            earliest = get_earliest_trade_date()
+            if earliest is None:
+                sys.exit("--backfill requested but no trade_date found in bronze/trades — ingest trades first.")
+            start_date = earliest
+            print(f"--backfill: earliest trade_date found is {start_date}, using as start")
+        else:
+            start_date = datetime.strptime(args.start, "%Y-%m-%d").date() if args.start else end_date - timedelta(days=5)
     except ValueError as e:
         sys.exit(f"Date parsing error: {e}. Use YYYY-MM-DD format.")
         return
@@ -215,12 +257,10 @@ def main():
         print(f"Warning: The following tickers returned 0 rows: {missing_symbols}")
 
     # Check 3: Assert date range matches what was requested
-    # Convert string dates in DF to datetime.date objects for exact comparison
     df_dates = pd.to_datetime(df['price_date']).dt.date
     df_min_date = df_dates.min()
     df_max_date = df_dates.max()
 
-    # We validate that the data sits strictly within the bounds requested
     assert df_min_date >= start_date, f"Validation Failed: Data starts at {df_min_date}, requested {start_date}"
     assert df_max_date <= end_date, f"Validation Failed: Data ends at {df_max_date}, requested target was {end_date}"
 

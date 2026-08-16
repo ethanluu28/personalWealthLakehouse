@@ -1,12 +1,9 @@
 """
 Bronze layer ingestion: bank CSV -> partitioned Parquet on S3
 
-Design:
 - One parser function per card issuer (Amex, Chase), each normalizing to a
   common internal schema before ingestion metadata is added.
-- Common schema written to bronze is intentionally "raw-ish" — minimal
-  transformation here. Real cleaning/typing/categorization belongs in the
-  silver dbt staging models, not in bronze ingestion.
+
 - Partitioned by source + statement month so DuckDB can glob-read cleanly:
     s3://<bucket>/bronze/bank_transactions/source=amex/year_month=2026-08/*.parquet
     s3://<bucket>/bronze/bank_transactions/source=chase/year_month=2026-08/*.parquet

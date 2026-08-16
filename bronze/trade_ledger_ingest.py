@@ -1,28 +1,14 @@
 """
 Bronze layer ingestion: trade ledger CSV -> partitioned Parquet on S3
 
-Design:
 - Mirrors the pattern in bronze_ingest_bank_csv.py: parse -> stamp lineage
   metadata + row_hash -> partition by year_month -> write Parquet to S3.
-- Source is a Fidelity-style brokerage export (confirmed columns: Run Date,
-  Account, Account Number, Action, Symbol, Description, Type, Exchange,
-  Exchange, Currency, Price, Quantity, Exchange, Commission, Fees,
-  Accrued Interest, Amount, Settlement Date). Only a subset is kept — see
-  KEEP_COLUMNS below.
-- The real header row is NOT the first row — there are 2 metadata rows
-  above it in the export (same pattern as the Amex file), hence skiprows=2.
-  TODO: reconfirm this offset if Fidelity changes their export format.
-- Amount sign convention (confirmed): buys are NEGATIVE, sells and
-  dividends are POSITIVE. Kept as-is from the source file — no flip needed,
-  unlike the Chase bank CSV case.
-- Partitioned by broker + trade month, same pattern as bronze_ingest_bank_csv.py
-  (prevents a second broker's files from colliding with Fidelity's in the
-  same month):
+
     s3://<bucket>/bronze/trades/source=fidelity/year_month=2026-08/*.parquet
 
 Usage:
-    python trade_ledger_ingest.py --source fidelity --file ~/Downloads/fidelity_trades_2026.csv
-    python trade_ledger_ingest.py --source fidelity --file ~/Downloads/fidelity_trades_2026.csv --dry-run
+    python trade_ledger_ingest.py --source fidelity --file ~/Downloads/vanguard_trades_2026.csv
+    python trade_ledger_ingest.py --source vanguard --file ~/Downloads/vanguard_2026.csv --dry-run
 """
 
 import argparse
@@ -68,10 +54,7 @@ def parse_fidelity(csv_path: Path) -> pd.DataFrame:
       trade_date (date), account (str), action (str), symbol (str),
       currency (str), price (float), quantity (float), amount (float),
       source_account_hint (str)
-    Broker-specific — a different broker (different column names/layout)
-    needs its own parser function returning this SAME schema, registered
-    below in PARSERS. See parse_amex/parse_chase in bronze_ingest_bank_csv.py
-    for the established pattern.
+
     """
     df = pd.read_csv(csv_path, skiprows=FIDELITY_HEADER_SKIPROWS, skipfooter=FIDELITY_FOOTER_SKIPROWS, engine="python")
 
@@ -113,34 +96,6 @@ def parse_vanguard(csv_path: Path) -> pd.DataFrame:
     symbol (str), currency (str), price (float), quantity (float),
     amount (float), source_account_hint (str).
 
-    Column mapping notes (from the confirmed real header sample — a single
-    BUY row, so several of these are best-effort until you see SELL and
-    DIVIDEND rows too):
-      - 'Symbol' used directly (clean ticker, e.g. 'NKE') — NOT
-        'Investment Symbol', which bundles company name + ticker together
-        (e.g. 'NIKE INC (NKE)') and would need regex extraction if you ever
-        had to fall back to it.
-      - 'Transaction Description' used for `action` rather than
-        'Transaction Type' — in the sample both said "Buy" identically, but
-        Description is likely the more granular field once dividends/
-        reinvestments appear (mirrors Fidelity's single 'Action' column,
-        which is itself a long descriptive string, not a short code).
-      - 'Net Amount' used for `amount` (true net cash impact including
-        commission), not 'Principal Amount' (pre-commission). In the sample
-        row commission was 0 so both were identical (-157.76) — TODO:
-        confirm this holds once you see a row with nonzero commission.
-      - No 'Currency' column in this export (unlike Fidelity) — TODO:
-        confirm USD-only assumption is safe for your Vanguard holdings.
-      - 'Account Number' used directly for `account` (Vanguard's export
-        doesn't offer a friendly nickname like Fidelity's 'Individual'/
-        'BrokerageLink' — it's the raw account number). This is more
-        sensitive than a nickname; acceptable since it's your own private
-        S3 bucket, not a shared repo, but worth being aware it's landing
-        in bronze verbatim.
-      - Sign convention: the one confirmed BUY row is negative (-157.76),
-        matching Fidelity's convention (buys negative) — TODO: confirm
-        SELL/DIVIDEND rows are positive once you have a real file with
-        those action types, same as we validated for Fidelity.
     """
     df = pd.read_csv(csv_path, skiprows=VANGUARD_HEADER_SKIPROWS, skipfooter=VANGUARD_FOOTER_SKIPROWS, engine="python")
 
@@ -165,9 +120,6 @@ def parse_vanguard(csv_path: Path) -> pd.DataFrame:
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
     df["symbol"] = df["symbol"].astype(str).str.strip()
     df["action"] = df["action"].astype(str).str.strip()
-
-    # TODO: same caveat as Fidelity — $ signs/commas/parens could break a
-    # plain astype(float); verify against a real file.
     df["price"] = df["price"].astype(float)
     df["quantity"] = df["quantity"].astype(float)
     df["amount"] = df["amount"].astype(float)
